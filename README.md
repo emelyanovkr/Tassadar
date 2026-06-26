@@ -9,8 +9,8 @@
 export YC_CLOUD_ID="<cloud-id>"
 export YC_FOLDER_ID="<folder-id>"
 export YC_ZONE="ru-central1-a"
-export YC_SERVICE_ACCOUNT_KEY_FILE="$HOME/.config/yandex-cloud/authorized_key.json"
-export TF_VAR_ssh_public_key_path="$HOME/.ssh/id_tassadar.pub"
+export YC_SERVICE_ACCOUNT_KEY_FILE="$HOME/.config/yandex-cloud/authorized_key.json" - go to Identity and Access Mangament > Service Accounts > Choose account and export authorized_key
+export TF_VAR_ssh_public_key_path="$HOME/.ssh/id_tassadar.pub" - dont forget to add your key to ssh agent
 ```
 
 ! Alternatively, add these variables to `~/.zshrc` or `~/.bashrc`. They will be loaded automatically for every new terminal session.

@@ -31,3 +31,17 @@ output "bastion_public_ip" {
   description = "Dynamic public IPv4 address of the bastion host."
   value       = yandex_compute_instance.bastion.network_interface[0].nat_ip_address
 }
+
+output "pxc_private_ips" {
+  description = "Private IPv4 addresses of the PXC nodes."
+  value = {
+    for name, instance in yandex_compute_instance.pxc : name => instance.network_interface[0].ip_address
+  }
+}
+
+output "pxc_instance_ids" {
+  description = "IDs of the PXC node instances."
+  value = {
+    for name, instance in yandex_compute_instance.pxc : name => instance.id
+  }
+}
