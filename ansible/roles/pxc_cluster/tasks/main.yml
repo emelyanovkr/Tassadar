@@ -1,0 +1,179 @@
+---
+- name: Require exactly three PXC nodes
+  ansible.builtin.assert:
+    that:
+      - groups['pxc'] | length == 3
+      - "'pxc-1' in groups['pxc']"
+      - "'pxc-2' in groups['pxc']"
+      - "'pxc-3' in groups['pxc']"
+    fail_msg: "PXC cluster role expects pxc-1, pxc-2, and pxc-3 in the pxc inventory group."
+  run_once: true
+  tags:
+    - cluster
+    - verify
+
+- name: Start bootstrap mysql service
+  ansible.builtin.systemd:
+    name: mysql@bootstrap.service
+    state: started
+    enabled: false
+  delegate_to: pxc-1
+  run_once: true
+  tags:
+    - cluster
+
+- name: Wait for MySQL on bootstrap node
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: 3306
+    timeout: 180
+  delegate_to: pxc-1
+  run_once: true
+  tags:
+    - cluster
+
+- name: Read bootstrap wsrep status
+  ansible.builtin.command: >
+    mysql --user={{ pxc_root_user }}
+    --batch --skip-column-names
+    --execute="SHOW STATUS WHERE Variable_name IN
+    ('wsrep_cluster_size', 'wsrep_cluster_status', 'wsrep_local_state_comment', 'wsrep_connected', 'wsrep_ready');"
+  environment:
+    MYSQL_PWD: "{{ pxc_root_password }}"
+  register: pxc_bootstrap_wsrep_status
+  changed_when: false
+  until:
+    - "'wsrep_cluster_size\t1' in pxc_bootstrap_wsrep_status.stdout"
+    - "'wsrep_cluster_status\tPrimary' in pxc_bootstrap_wsrep_status.stdout"
+    - "'wsrep_local_state_comment\tSynced' in pxc_bootstrap_wsrep_status.stdout"
+    - "'wsrep_connected\tON' in pxc_bootstrap_wsrep_status.stdout"
+    - "'wsrep_ready\tON' in pxc_bootstrap_wsrep_status.stdout"
+  retries: 36
+  delay: 5
+  delegate_to: pxc-1
+  run_once: true
+  no_log: true
+  tags:
+    - cluster
+
+- name: Read PXC TLS file content
+  ansible.builtin.slurp:
+    src: "{{ pxc_mysql_datadir }}/{{ item }}"
+  loop: "{{ pxc_tls_files }}"
+  register: pxc_tls_file_content
+  delegate_to: pxc-1
+  run_once: true
+  no_log: true
+  tags:
+    - cluster
+
+- name: Join remaining PXC nodes
+  ansible.builtin.include_tasks: join.yml
+  loop: "{{ groups['pxc'] | reject('equalto', 'pxc-1') | list }}"
+  loop_control:
+    loop_var: pxc_joiner
+  run_once: true
+  tags:
+    - cluster
+
+- name: Read wsrep health status
+  ansible.builtin.command: >
+    mysql --user={{ pxc_root_user }}
+    --batch --skip-column-names
+    --execute="SHOW STATUS WHERE Variable_name IN
+    ('wsrep_cluster_size', 'wsrep_cluster_status', 'wsrep_local_state_comment', 'wsrep_connected', 'wsrep_ready');"
+  environment:
+    MYSQL_PWD: "{{ pxc_root_password }}"
+  loop: "{{ groups['pxc'] }}"
+  loop_control:
+    loop_var: pxc_node
+  register: pxc_wsrep_health_status
+  changed_when: false
+  delegate_to: "{{ pxc_node }}"
+  run_once: true
+  no_log: true
+  tags:
+    - verify
+
+- name: Verify healthy 3-node Primary cluster
+  ansible.builtin.assert:
+    that:
+      - "'wsrep_cluster_size\t3' in item.stdout"
+      - "'wsrep_cluster_status\tPrimary' in item.stdout"
+      - "'wsrep_local_state_comment\tSynced' in item.stdout"
+      - "'wsrep_connected\tON' in item.stdout"
+      - "'wsrep_ready\tON' in item.stdout"
+    fail_msg: "PXC node is not fully synced in a 3-node Primary cluster."
+  loop: "{{ pxc_wsrep_health_status.results }}"
+  run_once: true
+  no_log: true
+  tags:
+    - verify
+
+- name: Create replication test database
+  ansible.builtin.command: >
+    mysql --user={{ pxc_root_user }}
+    --execute="CREATE DATABASE IF NOT EXISTS percona;"
+  environment:
+    MYSQL_PWD: "{{ pxc_root_password }}"
+  changed_when: false
+  delegate_to: pxc-2
+  run_once: true
+  no_log: true
+  tags:
+    - verify
+
+- name: Create replication test table
+  ansible.builtin.command: >
+    mysql --user={{ pxc_root_user }}
+    --execute="CREATE TABLE IF NOT EXISTS percona.example (
+    node_id INT PRIMARY KEY,
+    node_name VARCHAR(30)
+    );"
+  environment:
+    MYSQL_PWD: "{{ pxc_root_password }}"
+  changed_when: false
+  delegate_to: pxc-3
+  run_once: true
+  no_log: true
+  tags:
+    - verify
+
+- name: Insert replication test row
+  ansible.builtin.command: >
+    mysql --user={{ pxc_root_user }}
+    --execute="INSERT INTO percona.example (node_id, node_name)
+    VALUES (1, 'percona1')
+    ON DUPLICATE KEY UPDATE node_name = VALUES(node_name);"
+  environment:
+    MYSQL_PWD: "{{ pxc_root_password }}"
+  changed_when: false
+  delegate_to: pxc-1
+  run_once: true
+  no_log: true
+  tags:
+    - verify
+
+- name: Read replicated row
+  ansible.builtin.command: >
+    mysql --user={{ pxc_root_user }}
+    --batch --skip-column-names
+    --execute="SELECT node_id, node_name FROM percona.example WHERE node_id = 1;"
+  environment:
+    MYSQL_PWD: "{{ pxc_root_password }}"
+  register: pxc_replication_test_row
+  changed_when: false
+  delegate_to: pxc-2
+  run_once: true
+  no_log: true
+  tags:
+    - verify
+
+- name: Verify replicated row
+  ansible.builtin.assert:
+    that:
+      - "'1\tpercona1' in pxc_replication_test_row.stdout"
+    fail_msg: "Replication test row did not appear on pxc-2."
+  run_once: true
+  tags:
+    - verify

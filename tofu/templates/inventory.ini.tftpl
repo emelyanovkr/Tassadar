@@ -1,5 +1,5 @@
 [bastion]
-bastion ansible_host=${bastion_public_ip} ansible_user=ubuntu ansible_ssh_private_key_file=${ssh_private_key}
+pxc-bastion ansible_host=${bastion_public_ip} ansible_user=ubuntu ansible_ssh_private_key_file=${ssh_private_key}
 
 [pxc]
 %{ for name, ip in pxc_hosts ~}
@@ -9,4 +9,4 @@ ${name} ansible_host=${ip}
 [pxc:vars]
 ansible_user=ubuntu
 ansible_ssh_private_key_file=${ssh_private_key}
-ansible_ssh_common_args='-o ProxyJump=ubuntu@${bastion_public_ip}'
+ansible_ssh_common_args='-o ProxyCommand="ssh -i ${ssh_private_key} -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -W %h:%p -q ubuntu@${bastion_public_ip}"'

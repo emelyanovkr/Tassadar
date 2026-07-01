@@ -1,0 +1,53 @@
+---
+- name: Copy PXC TLS files to joiner node
+  ansible.builtin.copy:
+    content: "{{ (pxc_tls_file_content.results | selectattr('item', 'equalto', item) | first).content | b64decode }}"
+    dest: "{{ pxc_mysql_datadir }}/{{ item }}"
+    owner: mysql
+    group: mysql
+    mode: "{{ '0600' if item in pxc_tls_private_files else '0644' }}"
+  loop: "{{ pxc_tls_files }}"
+  delegate_to: "{{ pxc_joiner }}"
+  no_log: true
+  tags:
+    - cluster
+
+- name: Start mysql service to join cluster
+  ansible.builtin.systemd:
+    name: mysql
+    state: started
+    enabled: true
+  delegate_to: "{{ pxc_joiner }}"
+  tags:
+    - cluster
+
+- name: Wait for MySQL on joiner node
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: 3306
+    timeout: 300
+  delegate_to: "{{ pxc_joiner }}"
+  tags:
+    - cluster
+
+- name: Read joiner wsrep status
+  ansible.builtin.command: >
+    mysql --user={{ pxc_root_user }}
+    --batch --skip-column-names
+    --execute="SHOW STATUS WHERE Variable_name IN
+    ('wsrep_cluster_size', 'wsrep_cluster_status', 'wsrep_local_state_comment', 'wsrep_ready');"
+  environment:
+    MYSQL_PWD: "{{ pxc_root_password }}"
+  register: pxc_joiner_wsrep_status
+  changed_when: false
+  until:
+    - "'wsrep_cluster_size\t' ~ (pxc_joiner | regex_replace('^pxc-', '')) in pxc_joiner_wsrep_status.stdout"
+    - "'wsrep_cluster_status\tPrimary' in pxc_joiner_wsrep_status.stdout"
+    - "'wsrep_local_state_comment\tSynced' in pxc_joiner_wsrep_status.stdout"
+    - "'wsrep_ready\tON' in pxc_joiner_wsrep_status.stdout"
+  retries: 60
+  delay: 5
+  delegate_to: "{{ pxc_joiner }}"
+  no_log: true
+  tags:
+    - cluster

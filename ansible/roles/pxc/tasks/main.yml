@@ -1,0 +1,91 @@
+---
+- name: Validate target hosts
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.distribution == "Ubuntu"
+      - groups['pxc'] | length == 3
+      - inventory_hostname is match('^pxc-[123]$')
+      - pxc_root_password | length >= 12
+    fail_msg: "Expected Ubuntu hosts pxc-1..pxc-3 and root password with at least 12 chars."
+  no_log: true
+
+- name: Wait for cloud-init to finish
+  ansible.builtin.command: cloud-init status --wait
+  changed_when: false
+
+- name: Install Percona repository prerequisites
+  ansible.builtin.apt:
+    name:
+      - ca-certificates
+      - curl
+      - debconf-utils
+      - gnupg2
+      - lsb-release
+      - wget
+    state: present
+    update_cache: true
+    lock_timeout: 300
+
+- name: Download percona-release package
+  ansible.builtin.get_url:
+    url: https://repo.percona.com/apt/percona-release_latest.generic_all.deb
+    dest: /tmp/percona-release_latest.generic_all.deb
+    mode: "0644"
+
+- name: Install percona-release package
+  ansible.builtin.apt:
+    deb: /tmp/percona-release_latest.generic_all.deb
+    state: present
+    lock_timeout: 300
+
+- name: Enable Percona XtraDB Cluster repository
+  ansible.builtin.command: "percona-release setup {{ pxc_repo }}"
+  register: pxc_repo_setup
+  changed_when: "'already' not in (pxc_repo_setup.stdout | lower)"
+
+- name: Refresh apt cache
+  ansible.builtin.apt:
+    update_cache: true
+    lock_timeout: 300
+
+- name: Preseed PXC root password
+  ansible.builtin.debconf:
+    name: percona-xtradb-cluster-server
+    question: "{{ item }}"
+    value: "{{ pxc_root_password }}"
+    vtype: password
+  loop:
+    - percona-xtradb-cluster-server/root-pass
+    - percona-xtradb-cluster-server/re-root-pass
+  no_log: true
+
+- name: Install Percona XtraDB Cluster
+  ansible.builtin.apt:
+    name: percona-xtradb-cluster
+    state: present
+    lock_timeout: 300
+    policy_rc_d: 101
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+
+- name: Calculate PXC server id from host name
+  ansible.builtin.set_fact:
+    pxc_server_id: "{{ inventory_hostname | regex_replace('^pxc-', '') | int }}"
+
+- name: Stop MySQL services before applying cluster configuration
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: stopped
+  loop:
+    - mysql
+    - mysql@bootstrap.service
+  failed_when: false
+
+- name: Render PXC cluster configuration
+  ansible.builtin.template:
+    src: pxc.cnf.j2
+    dest: /etc/mysql/mysql.conf.d/mysqld.cnf
+    owner: root
+    group: root
+    mode: "0644"
+  no_log: true

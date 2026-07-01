@@ -35,3 +35,32 @@ cd tofu
 - `tofu plan` shows which infrastructure changes will be made.
 - `tofu apply` applies the planned infrastructure changes.
 - `tofu destroy` deletes all infrastructure managed by the current state.
+
+## Ansible
+
+OpenTofu generates the Ansible inventory at `ansible/inventory.ini`.
+
+Run commands from the `ansible` directory:
+
+```bash
+cd ansible
+```
+
+Check SSH access:
+
+```bash
+ansible bastion -m ping
+ansible pxc -m ping
+```
+
+Install and verify Percona on the three PXC VMs:
+
+```bash
+ansible-playbook playbooks/pxc.yml
+```
+
+The playbook generates the MySQL root password on first run and stores it in
+`ansible/.generated/`, which is ignored by git. To use your own password,
+override `pxc_root_password_override` in Ansible vars.
+
+For more information, please refer to `ansible/README.md`

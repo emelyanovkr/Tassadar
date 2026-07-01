@@ -1,0 +1,25 @@
+---
+- name: Prepare Percona nodes
+  hosts: pxc
+  become: true
+  any_errors_fatal: true
+  roles:
+    - role: pxc
+      tags:
+        - install
+  tags:
+    - install
+
+- name: Configure PXC cluster
+  hosts: pxc
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  roles:
+    - role: pxc_cluster
+      tags:
+        - cluster
+        - verify
+  tags:
+    - cluster
+    - verify

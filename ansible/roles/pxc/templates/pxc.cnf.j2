@@ -1,0 +1,14 @@
+[mysqld]
+server_id={{ pxc_server_id }}
+
+wsrep_provider={{ pxc_provider }}
+wsrep_cluster_name={{ pxc_cluster_name }}
+wsrep_cluster_address={{ pxc_cluster_address }}
+wsrep_node_name={{ inventory_hostname }}
+wsrep_node_address={{ ansible_host }}
+pxc_strict_mode=ENFORCING
+wsrep_sst_method={{ pxc_sst_method }}
+
+binlog_format=ROW
+default_storage_engine=InnoDB
+innodb_autoinc_lock_mode=2

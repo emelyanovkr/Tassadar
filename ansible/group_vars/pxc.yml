@@ -1,0 +1,23 @@
+---
+pxc_repo: pxc80
+
+pxc_cluster_name: tassadar-pxc
+pxc_provider: /usr/lib/galera4/libgalera_smm.so
+pxc_sst_method: xtrabackup-v2
+pxc_root_user: root
+pxc_mysql_datadir: /var/lib/mysql
+pxc_tls_files:
+  - ca.pem
+  - server-cert.pem
+  - server-key.pem
+  - client-cert.pem
+  - client-key.pem
+pxc_tls_private_files:
+  - server-key.pem
+  - client-key.pem
+
+pxc_generated_password_dir: "{{ inventory_dir }}/.generated"
+pxc_root_password: "{{ pxc_root_password_override | default(lookup('password', pxc_generated_password_dir + '/pxc_root_password length=24 chars=ascii_letters,digits')) }}"
+
+pxc_cluster_hosts: "{{ groups['pxc'] | default([]) }}"
+pxc_cluster_address: "gcomm://{{ pxc_cluster_hosts | map('extract', hostvars, 'ansible_host') | join(',') }}"
