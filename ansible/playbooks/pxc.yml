@@ -17,9 +17,3 @@
   any_errors_fatal: true
   roles:
     - role: pxc_cluster
-      tags:
-        - cluster
-        - verify
-  tags:
-    - cluster
-    - verify

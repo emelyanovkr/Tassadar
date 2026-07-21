@@ -13,14 +13,16 @@
   ansible.builtin.command: cloud-init status --wait
   changed_when: false
 
-- name: Install Percona repository prerequisites
+- name: Install Percona repository and filesystem prerequisites
   ansible.builtin.apt:
     name:
       - ca-certificates
       - curl
       - debconf-utils
+      - e2fsprogs
       - gnupg2
       - lsb-release
+      - util-linux
       - wget
     state: present
     update_cache: true
@@ -48,6 +50,80 @@
     update_cache: true
     lock_timeout: 300
 
+- name: Wait for the dedicated PXC data disk
+  ansible.builtin.wait_for:
+    path: "{{ pxc_data_device }}"
+    timeout: 60
+
+- name: Read PXC data disk filesystem
+  ansible.builtin.command:
+    argv:
+      - lsblk
+      - --noheadings
+      - --output
+      - FSTYPE
+      - "{{ pxc_data_device }}"
+  register: pxc_data_filesystem_probe
+  changed_when: false
+
+- name: Accept only an empty or ext4 PXC data disk
+  ansible.builtin.assert:
+    that:
+      - pxc_data_filesystem_probe.stdout | trim in ['', pxc_data_filesystem]
+    fail_msg: >-
+      {{ pxc_data_device }} contains an unexpected filesystem.
+      Refusing to format it.
+
+- name: Format an empty PXC data disk
+  ansible.builtin.command:
+    argv:
+      - "mkfs.{{ pxc_data_filesystem }}"
+      - -F
+      - "{{ pxc_data_device }}"
+  when: (pxc_data_filesystem_probe.stdout | trim) == ''
+
+- name: Create MySQL data mount point
+  ansible.builtin.file:
+    path: "{{ pxc_mysql_datadir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Persist PXC data mount in fstab
+  ansible.builtin.lineinfile:
+    path: /etc/fstab
+    regexp: "^[^#]\\S+\\s+{{ pxc_mysql_datadir | regex_escape }}\\s+"
+    line: "{{ pxc_data_device }} {{ pxc_mysql_datadir }} {{ pxc_data_filesystem }} defaults 0 2"
+    state: present
+
+- name: Check MySQL data mount
+  ansible.builtin.command:
+    argv:
+      - findmnt
+      - --noheadings
+      - --mountpoint
+      - "{{ pxc_mysql_datadir }}"
+  register: pxc_mysql_mount_probe
+  changed_when: false
+  failed_when: false
+
+- name: Mount PXC data disk
+  ansible.builtin.command:
+    argv:
+      - mount
+      - "{{ pxc_mysql_datadir }}"
+  when: pxc_mysql_mount_probe.rc != 0
+
+- name: Remove ext4 lost+found before MySQL initialization
+  ansible.builtin.command:
+    argv:
+      - rmdir
+      - "{{ pxc_mysql_datadir }}/lost+found"
+  register: pxc_remove_lost_found
+  changed_when: pxc_remove_lost_found.rc == 0
+  failed_when: false
+
 - name: Preseed PXC root password
   ansible.builtin.debconf:
     name: percona-xtradb-cluster-server
@@ -71,15 +147,6 @@
 - name: Calculate PXC server id from host name
   ansible.builtin.set_fact:
     pxc_server_id: "{{ inventory_hostname | regex_replace('^pxc-', '') | int }}"
-
-- name: Stop MySQL services before applying cluster configuration
-  ansible.builtin.systemd:
-    name: "{{ item }}"
-    state: stopped
-  loop:
-    - mysql
-    - mysql@bootstrap.service
-  failed_when: false
 
 - name: Render PXC cluster configuration
   ansible.builtin.template:

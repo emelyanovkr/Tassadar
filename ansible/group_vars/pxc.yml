@@ -6,6 +6,8 @@ pxc_provider: /usr/lib/galera4/libgalera_smm.so
 pxc_sst_method: xtrabackup-v2
 pxc_root_user: root
 pxc_mysql_datadir: /var/lib/mysql
+pxc_data_device: /dev/disk/by-id/virtio-data
+pxc_data_filesystem: ext4
 pxc_tls_files:
   - ca.pem
   - server-cert.pem

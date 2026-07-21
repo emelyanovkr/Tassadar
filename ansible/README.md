@@ -1,83 +1,92 @@
 # playbooks/pxc.yml
 
-Installs and bootstraps Percona XtraDB Cluster on three private nodes.
+This playbook installs and configures a three-node Percona XtraDB Cluster. It
+expects the inventory group `pxc` to contain exactly `pxc-1`, `pxc-2`, and
+`pxc-3`.
 
-The playbook runs in two main steps:
+The playbook consists of two plays and two roles:
 
-1. `pxc` installs Percona packages and renders MySQL/PXC configuration.
-2. `pxc_cluster` bootstraps the first node, joins the remaining nodes, and runs health/replication checks.
+1. `Prepare Percona nodes` runs the `pxc` role on all PXC nodes.
+2. `Configure PXC cluster` runs the `pxc_cluster` orchestration role.
 
-What it does:
+## Role `pxc`
 
-- installs official Percona apt prerequisites;
-- installs `percona-release`;
-- enables the `pxc80` repository;
-- installs `percona-xtradb-cluster`;
-- renders PXC cluster configuration on all three nodes;
-- bootstraps only `pxc-1` with `mysql@bootstrap.service`;
-- verifies that `pxc-1` is a healthy single-node Primary cluster;
-- copies PXC TLS files from `pxc-1` to joiner nodes;
-- joins `pxc-2` and verifies a healthy 2-node Primary cluster;
-- joins `pxc-3` and verifies a healthy 3-node Primary cluster;
-- verifies wsrep health on every node;
-- verifies replication by creating a database/table/row across different nodes.
+The preparation role performs the same installation and configuration steps on
+all three nodes:
 
-Run from the `ansible` directory:
+- validates Ubuntu, the inventory host names, and the generated root password;
+- waits until `cloud-init` has finished;
+- installs the packages required by the official Percona apt repository;
+- installs `percona-release` and enables the `pxc80` repository;
+- waits for the dedicated data device at `/dev/disk/by-id/virtio-data`;
+- formats the device as `ext4` only when it does not already contain a
+  filesystem;
+- persists the stable `/dev/disk/by-id/virtio-data` mount in `/etc/fstab`;
+- preseeds the MySQL root password for non-interactive package installation;
+- installs the `percona-xtradb-cluster` package directly onto the mounted data
+  disk without automatically starting MySQL;
+- calculates `server_id` from the inventory name (`pxc-1` becomes `1`);
+- renders `/etc/mysql/mysql.conf.d/mysqld.cnf` from
+  `roles/pxc/templates/pxc.cnf.j2`.
 
-```bash
-ansible-playbook playbooks/pxc.yml
-```
+The disk is mounted before the Percona package is installed, so MySQL creates
+its data directory on the dedicated disk from the beginning. There is no
+datadir migration or copy step. A disk with an unexpected filesystem causes
+the role to fail instead of formatting it.
 
-Useful tags:
+The rendered configuration contains the Galera provider, cluster name and
+address, node name and private address, strict mode, SST method, and the MySQL
+settings required by PXC. `wsrep_cluster_address` is built automatically from
+the private `ansible_host` values of every host in the `pxc` group.
 
-```bash
-ansible-playbook playbooks/pxc.yml --tags install
-ansible-playbook playbooks/pxc.yml --tags cluster
-ansible-playbook playbooks/pxc.yml --tags verify
-```
+## Role `pxc_cluster`
 
-## Connectivity
+The cluster role orchestrates the nodes in a strict order:
 
-The PXC nodes do not have public IP addresses. Ansible connects to them through
-the bastion host using the generated `inventory.ini`.
+1. Starts `mysql@bootstrap.service` only on `pxc-1`.
+2. Waits until `pxc-1` reports a one-node `Primary` cluster in the `Synced`
+   state with `wsrep_connected=ON` and `wsrep_ready=ON`.
+3. Reads the default PXC TLS files from `pxc-1` and copies them to each joining
+   node.
+4. Starts regular `mysql` on `pxc-2` and verifies a healthy two-node cluster.
+5. Starts regular `mysql` on `pxc-3` and verifies a healthy three-node
+   cluster.
+6. Checks wsrep health on every node.
+7. Verifies replication with a database, table, and row written across
+   different nodes.
 
-Basic SSH checks:
+The orchestration tasks use `run_once` with `delegate_to`. Ansible still opens
+each SSH connection from the local control machine through the bastion; the PXC
+nodes do not connect to each other over SSH.
 
-```bash
-ansible -i inventory.ini bastion -m ping
-ansible -i inventory.ini pxc -m ping
-```
+## Variables
 
-## MySQL checks
+Cluster variables are defined in `group_vars/pxc.yml`:
 
-The root password is generated locally in `.generated/pxc_root_password`.
+- `pxc_repo` selects the Percona repository (`pxc80` by default);
+- `pxc_cluster_name` sets the wsrep cluster name;
+- `pxc_provider` points to the Galera provider library;
+- `pxc_sst_method` selects the state snapshot transfer method;
+- `pxc_mysql_datadir` points to the MySQL data directory;
+- `pxc_data_device` and `pxc_data_filesystem` control the dedicated
+  data-disk mount;
+- `pxc_tls_files` and `pxc_tls_private_files` describe the TLS files copied
+  from the bootstrap node;
+- `pxc_cluster_address` is generated from all PXC private IP addresses;
+- `pxc_root_password` is generated once in `.generated/pxc_root_password`.
 
-Read wsrep status from the first node:
+To provide a fixed root password, define `pxc_root_password_override` in
+Ansible variables. Do not commit the password to the repository.
 
-```bash
-ansible -i inventory.ini pxc-1 -b -m shell -a \
-  "MYSQL_PWD='$(cat .generated/pxc_root_password)' mysql --user=root --execute=\"SHOW STATUS LIKE 'wsrep%';\""
-```
+## Tags
 
-Check cluster size on all nodes:
+- `install` runs package installation and configuration;
+- `cluster` runs bootstrap and sequential node joins;
+- `verify` runs wsrep health and replication checks.
 
-```bash
-ansible -i inventory.ini pxc -b -m shell -a \
-  "MYSQL_PWD='$(cat .generated/pxc_root_password)' mysql --user=root --batch --skip-column-names --execute=\"SHOW STATUS LIKE 'wsrep_cluster_size';\""
-```
+The initial deployment should use the complete playbook. The `install` tag
+prepares storage and leaves MySQL stopped, `cluster` expects prepared nodes,
+and `verify` expects an already running three-node cluster.
 
-Useful manual replication test:
-
-```bash
-ansible -i inventory.ini pxc-2 -b -m shell -a \
-  "MYSQL_PWD='$(cat .generated/pxc_root_password)' mysql --user=root --execute=\"CREATE DATABASE IF NOT EXISTS percona_manual;\""
-
-ansible -i inventory.ini pxc-3 -b -m shell -a \
-  "MYSQL_PWD='$(cat .generated/pxc_root_password)' mysql --user=root --execute=\"CREATE TABLE IF NOT EXISTS percona_manual.example (id INT PRIMARY KEY, node_name VARCHAR(30));\""
-
-ansible -i inventory.ini pxc-1 -b -m shell -a \
-  "MYSQL_PWD='$(cat .generated/pxc_root_password)' mysql --user=root --execute=\"INSERT INTO percona_manual.example VALUES (1, 'pxc-1') ON DUPLICATE KEY UPDATE node_name = VALUES(node_name);\""
-
-ansible -i inventory.ini pxc-2 -b -m shell -a \
-  "MYSQL_PWD='$(cat .generated/pxc_root_password)' mysql --user=root --execute=\"SELECT * FROM percona_manual.example;\""
-```
+Project-level run commands, connectivity checks, and basic MySQL commands are
+documented in the root `README.md`.
