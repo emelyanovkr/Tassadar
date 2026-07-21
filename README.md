@@ -13,6 +13,9 @@ export YC_ZONE="ru-central1-a"
 export YC_SERVICE_ACCOUNT_KEY_FILE="$HOME/.config/yandex-cloud/authorized_key.json"
 # Add the matching private key to ssh-agent before running Ansible.
 export TF_VAR_ssh_public_key_path="$HOME/.ssh/id_tassadar.pub"
+# Static access key of the service account allowed to use the state bucket.
+export AWS_ACCESS_KEY_ID="<object-storage-static-key-id>"
+export AWS_SECRET_ACCESS_KEY="<object-storage-static-secret-key>"
 ```
 
 ! Alternatively, add these variables to `~/.zshrc` or `~/.bashrc`. They will be loaded automatically for every new terminal session.
@@ -37,6 +40,14 @@ cd tofu
 - `tofu plan` shows which infrastructure changes will be made.
 - `tofu apply` applies the planned infrastructure changes.
 - `tofu destroy` deletes all infrastructure managed by the current state.
+
+## Remote state
+
+OpenTofu stores state in the private, versioned Yandex Object Storage bucket
+`opentofu-s3-bucket` under `tassadar/terraform.tfstate`. Backend credentials are
+read from `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`;
+
+The backend uses a native S3 lock file to prevent concurrent state writes.
 
 ## Ansible
 
