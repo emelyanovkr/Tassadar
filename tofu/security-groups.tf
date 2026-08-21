@@ -1,64 +1,79 @@
-resource "yandex_vpc_security_group" "bastion" {
-  name       = "${var.name_prefix}-bastion-sg"
-  network_id = yandex_vpc_network.pxc.id
+resource "digitalocean_firewall" "bastion" {
+  name = "${var.name_prefix}-bastion-firewall"
+  tags = [digitalocean_tag.bastion.name]
 
-  ingress {
-    description    = "SSH with public key authentication"
-    protocol       = "TCP"
-    port           = 22
-    v4_cidr_blocks = ["0.0.0.0/0"]
+  inbound_rule {
+    protocol         = "tcp"
+    port_range       = "22"
+    source_addresses = [var.admin_cidr]
   }
 
-  egress {
-    description    = "Allow outbound traffic"
-    protocol       = "ANY"
-    v4_cidr_blocks = ["0.0.0.0/0"]
+  outbound_rule {
+    protocol              = "tcp"
+    port_range            = "1-65535"
+    destination_addresses = ["0.0.0.0/0", "::/0"]
+  }
+
+  outbound_rule {
+    protocol              = "udp"
+    port_range            = "1-65535"
+    destination_addresses = ["0.0.0.0/0", "::/0"]
+  }
+
+  outbound_rule {
+    protocol              = "icmp"
+    destination_addresses = ["0.0.0.0/0", "::/0"]
   }
 }
 
-resource "yandex_vpc_security_group" "pxc" {
-  name       = "${var.name_prefix}-nodes-sg"
-  network_id = yandex_vpc_network.pxc.id
+resource "digitalocean_firewall" "pxc" {
+  name = "${var.name_prefix}-nodes-firewall"
+  tags = [digitalocean_tag.pxc.name]
 
-  ingress {
-    description       = "SSH from the bastion host"
-    protocol          = "TCP"
-    port              = 22
-    security_group_id = yandex_vpc_security_group.bastion.id
+  inbound_rule {
+    protocol    = "tcp"
+    port_range  = "22"
+    source_tags = [digitalocean_tag.bastion.name]
   }
 
-  ingress {
-    description       = "MySQL access from the bastion host"
-    protocol          = "TCP"
-    port              = 3306
-    security_group_id = yandex_vpc_security_group.bastion.id
+  inbound_rule {
+    protocol    = "tcp"
+    port_range  = "3306"
+    source_tags = [digitalocean_tag.bastion.name]
   }
 
-  ingress {
-    description       = "PXC state snapshot transfer"
-    protocol          = "TCP"
-    port              = 4444
-    predefined_target = "self_security_group"
+  inbound_rule {
+    protocol    = "tcp"
+    port_range  = "4444"
+    source_tags = [digitalocean_tag.pxc.name]
   }
 
-  ingress {
-    description       = "PXC replication and incremental state transfer"
-    protocol          = "TCP"
-    from_port         = 4567
-    to_port           = 4568
-    predefined_target = "self_security_group"
+  inbound_rule {
+    protocol    = "tcp"
+    port_range  = "4567-4568"
+    source_tags = [digitalocean_tag.pxc.name]
   }
 
-  ingress {
-    description       = "PXC multicast replication"
-    protocol          = "UDP"
-    port              = 4567
-    predefined_target = "self_security_group"
+  inbound_rule {
+    protocol    = "udp"
+    port_range  = "4567"
+    source_tags = [digitalocean_tag.pxc.name]
   }
 
-  egress {
-    description    = "Allow outbound traffic"
-    protocol       = "ANY"
-    v4_cidr_blocks = ["0.0.0.0/0"]
+  outbound_rule {
+    protocol              = "tcp"
+    port_range            = "1-65535"
+    destination_addresses = ["0.0.0.0/0", "::/0"]
+  }
+
+  outbound_rule {
+    protocol              = "udp"
+    port_range            = "1-65535"
+    destination_addresses = ["0.0.0.0/0", "::/0"]
+  }
+
+  outbound_rule {
+    protocol              = "icmp"
+    destination_addresses = ["0.0.0.0/0", "::/0"]
   }
 }

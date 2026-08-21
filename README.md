@@ -1,134 +1,91 @@
-# FiddInfra
+# Tassadar infrastructure
 
-## Setup
-1. Get an authorized key json file for the service account and save it outside the repository.
-2. Create `.env`
-3. Fill `.env`:
+OpenTofu provisions a three-node Percona XtraDB Cluster in DigitalOcean. Ansible installs and bootstraps PXC 8.0 on the created Droplets.
 
-```bash
-export YC_CLOUD_ID="<cloud-id>"
-export YC_FOLDER_ID="<folder-id>"
-export YC_ZONE="ru-central1-a"
-# Create this key in Identity and Access Management > Service Accounts.
-export YC_SERVICE_ACCOUNT_KEY_FILE="$HOME/.config/yandex-cloud/authorized_key.json"
-# Add the matching private key to ssh-agent before running Ansible.
-export TF_VAR_ssh_public_key_path="$HOME/.ssh/id_tassadar.pub"
-# Static access key of the service account allowed to use the state bucket.
-export AWS_ACCESS_KEY_ID="<object-storage-static-key-id>"
-export AWS_SECRET_ACCESS_KEY="<object-storage-static-secret-key>"
-```
+## Architecture
 
-! Alternatively, add these variables to `~/.zshrc` or `~/.bashrc`. They will be loaded automatically for every new terminal session.
+- the region's default DigitalOcean VPC, reused and kept after `tofu destroy`;
+- one public bastion Droplet;
+- three PXC Droplets connected through private VPC addresses;
+- one dedicated ext4 Block Storage volume per PXC node;
+- Cloud Firewalls allowing SSH/MySQL from the bastion and Galera traffic only between PXC nodes.
 
-4. Load env:
+## Configuration
+
+1. Create the local OpenTofu variables file:
 
 ```bash
-source .env
+cp tofu/secrets.auto.tfvars.example tofu/secrets.auto.tfvars
 ```
 
-## Commands
+Edit `tofu/secrets.auto.tfvars` and replace the placeholders. OpenTofu loads this file automatically.
 
-Run commands from the `tofu` directory:
+2. Store the DigitalOcean Spaces credentials in the standard AWS credentials file:
 
 ```bash
-cd tofu
+mkdir -p ~/.aws
+chmod 700 ~/.aws
 ```
 
-- `tofu init` initializes the working directory and downloads providers.
-- `tofu fmt -recursive` formats all OpenTofu files.
-- `tofu validate` checks the configuration syntax and internal consistency.
-- `tofu plan` shows which infrastructure changes will be made.
-- `tofu apply` applies the planned infrastructure changes.
-- `tofu destroy` deletes all infrastructure managed by the current state.
+Create or update `~/.aws/credentials`:
 
-## Remote state
+```ini
+[tassadar-spaces]
+aws_access_key_id = <spaces-access-key-id>
+aws_secret_access_key = <spaces-secret-access-key>
+```
 
-OpenTofu stores state in the private, versioned Yandex Object Storage bucket
-`opentofu-s3-bucket` under `tassadar/terraform.tfstate`. Backend credentials are
-read from `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`;
+Protect the credentials file:
 
-The backend uses a native S3 lock file to prevent concurrent state writes.
+```bash
+chmod 600 ~/.aws/credentials
+```
+
+Neither local file should be committed. `project_id` can be set to `null` to keep resources in the DigitalOcean default project.
+
+## OpenTofu
+
+Run from `tofu/`:
+
+```bash
+tofu init -reconfigure
+tofu fmt -recursive
+tofu validate
+tofu plan
+tofu apply
+```
+
+OpenTofu stores remote state in the private `tassadar-s3` DigitalOcean Spaces bucket at `tassadar/production.tfstate`. The backend reads Spaces credentials from the `tassadar-spaces` profile in `~/.aws/credentials`.
+
+OpenTofu generates `ansible/inventory.ini`. The PXC hosts are reached by their private VPC addresses through the bastion.
 
 ## Ansible
 
-OpenTofu generates the Ansible inventory at `ansible/inventory.ini`.
-The bastion host has a public IP address, while the PXC nodes have only private
-addresses. Connections to `pxc-1`, `pxc-2`, and `pxc-3` therefore go through
-the bastion according to the SSH options in the generated inventory.
-
-Run commands from the `ansible` directory:
-
-```bash
-cd ansible
-```
-
-Check SSH access:
+Run from `ansible/`:
 
 ```bash
 ansible bastion -m ping
 ansible pxc -m ping
-```
-
-Install Percona and configure the three-node cluster:
-
-```bash
 ansible-playbook playbooks/pxc.yml
 ```
 
-The playbook runs in two stages:
+The playbook:
 
-1. The `pxc` role installs Percona XtraDB Cluster, formats each empty dedicated
-   data disk, mounts it at `/var/lib/mysql`, and writes the MySQL/PXC
-   configuration on all three nodes.
-2. The `pxc_cluster` role bootstraps `pxc-1`, joins `pxc-2` and `pxc-3` one at
-   a time, and verifies cluster health and replication.
+1. installs Percona XtraDB Cluster 8.0;
+2. mounts each DigitalOcean volume at `/var/lib/mysql`;
+3. bootstraps `pxc-1`;
+4. joins `pxc-2` and `pxc-3`;
+5. verifies cluster health and replication.
 
-The playbook generates the MySQL root password on first run and stores it in
-`ansible/.generated/`, which is ignored by git. To use your own password,
-override `pxc_root_password_override` in Ansible vars.
+Generated MySQL passwords stay in `ansible/.generated/` and must not be committed.
 
-Run only a particular part of the playbook when needed:
+Useful checks:
 
 ```bash
-ansible-playbook playbooks/pxc.yml --tags install
-ansible-playbook playbooks/pxc.yml --tags cluster
 ansible-playbook playbooks/pxc.yml --tags verify
-```
 
-The `install` stage leaves MySQL stopped so that the cluster can be bootstrapped
-safely. Run the full playbook for the initial deployment. Use `cluster` after
-the nodes are prepared and `verify` only for an already running cluster.
-
-Check wsrep status on the first node:
-
-```bash
-ansible pxc-1 -b -m shell -a \
-  "MYSQL_PWD='$(cat .generated/pxc_root_password)' mysql --user=root --execute=\"SHOW STATUS LIKE 'wsrep%';\""
-```
-
-Check the cluster size on every node:
-
-```bash
 ansible pxc -b -m shell -a \
   "MYSQL_PWD='$(cat .generated/pxc_root_password)' mysql --user=root --batch --skip-column-names --execute=\"SHOW STATUS LIKE 'wsrep_cluster_size';\""
 ```
 
-The expected value is `3` on every PXC node. See `ansible/README.md` for the
-detailed playbook flow and role variables.
-
-Run a basic SQL query on `pxc-1`:
-
-```bash
-ansible pxc-1 -b -m shell -a \
-  "MYSQL_PWD='$(cat .generated/pxc_root_password)' mysql --user=root --execute=\"SELECT VERSION(); SHOW DATABASES;\""
-```
-
-To test replication manually, write on one node and read on another:
-
-```bash
-ansible pxc-1 -b -m shell -a \
-  "MYSQL_PWD='$(cat .generated/pxc_root_password)' mysql --user=root --execute=\"CREATE DATABASE IF NOT EXISTS pxc_test; CREATE TABLE IF NOT EXISTS pxc_test.example (id INT PRIMARY KEY, value VARCHAR(30)); INSERT INTO pxc_test.example VALUES (1, 'from-pxc-1') ON DUPLICATE KEY UPDATE value = VALUES(value);\""
-
-ansible pxc-2 -b -m shell -a \
-  "MYSQL_PWD='$(cat .generated/pxc_root_password)' mysql --user=root --execute=\"SELECT * FROM pxc_test.example;\""
-```
+The expected cluster size is `3` on every PXC node.

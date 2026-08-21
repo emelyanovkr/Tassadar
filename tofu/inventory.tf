@@ -3,9 +3,9 @@ resource "local_file" "ansible_inventory" {
   file_permission = "0644"
 
   content = templatefile("${path.module}/templates/inventory.ini.tftpl", {
-    bastion_public_ip = yandex_compute_instance.bastion.network_interface[0].nat_ip_address
+    bastion_public_ip = digitalocean_droplet.bastion.ipv4_address
     pxc_hosts = {
-      for name, instance in yandex_compute_instance.pxc : name => instance.network_interface[0].ip_address
+      for name, droplet in digitalocean_droplet.pxc : name => droplet.ipv4_address_private
     }
     ssh_private_key = trimsuffix(pathexpand(var.ssh_public_key_path), ".pub")
   })

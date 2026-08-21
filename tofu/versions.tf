@@ -6,8 +6,9 @@ terraform {
       source = "hashicorp/local"
     }
 
-    yandex = {
-      source = "yandex-cloud/yandex"
+    digitalocean = {
+      source  = "digitalocean/digitalocean"
+      version = "~> 2.0"
     }
   }
 }
