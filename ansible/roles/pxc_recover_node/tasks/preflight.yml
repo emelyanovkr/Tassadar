@@ -1,0 +1,94 @@
+---
+- name: Validate PXC node recovery parameters
+  ansible.builtin.assert:
+    that:
+      - groups['pxc'] | length == 3
+      - pxc_recovery_node | default('') in groups['pxc']
+      - pxc_recovery_allow_sst | default(false) | bool
+      - >-
+        pxc_recovery_donor | default(
+          groups['pxc']
+          | difference([pxc_recovery_node | default('')])
+          | sort
+          | first,
+          true
+        ) in groups['pxc'] | difference([pxc_recovery_node | default('')])
+    fail_msg: >-
+      Set pxc_recovery_node to one inventory node, optionally select a different
+      healthy pxc_recovery_donor, and explicitly set pxc_recovery_allow_sst=true.
+      SST may overwrite the recovery node's MySQL data directory.
+
+- name: Read wsrep status from survivor nodes
+  ansible.builtin.command: >
+    mysql --user={{ pxc_root_user }}
+    --batch --skip-column-names
+    --execute="SHOW STATUS WHERE Variable_name IN
+    ('wsrep_cluster_size', 'wsrep_cluster_status', 'wsrep_local_state_comment',
+    'wsrep_connected', 'wsrep_ready');"
+  environment:
+    MYSQL_PWD: "{{ pxc_root_password }}"
+  loop: "{{ groups['pxc'] | difference([pxc_recovery_node]) | sort }}"
+  loop_control:
+    label: "{{ item }}"
+  register: pxc_recovery_survivor_status
+  changed_when: false
+  failed_when: false
+  ignore_unreachable: true
+  delegate_to: "{{ item }}"
+  no_log: true
+
+- name: Require a healthy two-node Primary component
+  ansible.builtin.assert:
+    that:
+      - not (item.unreachable | default(false))
+      - item.rc | default(1) == 0
+      - "'wsrep_cluster_size\t2' in (item.stdout | default(''))"
+      - "'wsrep_cluster_status\tPrimary' in (item.stdout | default(''))"
+      - "'wsrep_local_state_comment\tSynced' in (item.stdout | default(''))"
+      - "'wsrep_connected\tON' in (item.stdout | default(''))"
+      - "'wsrep_ready\tON' in (item.stdout | default(''))"
+    fail_msg: >-
+      Survivor {{ item.item | default('unknown') }} is not a healthy member of a
+      two-node Primary component. Refusing single-node recovery.
+  loop: "{{ pxc_recovery_survivor_status.results }}"
+  loop_control:
+    label: "{{ item.item | default('unknown') }}"
+  no_log: true
+
+- name: Probe the recovery node wsrep status
+  ansible.builtin.command: >
+    mysql --user={{ pxc_root_user }}
+    --batch --skip-column-names
+    --execute="SHOW STATUS WHERE Variable_name IN
+    ('wsrep_cluster_size', 'wsrep_cluster_status', 'wsrep_local_state_comment',
+    'wsrep_connected', 'wsrep_ready');"
+  environment:
+    MYSQL_PWD: "{{ pxc_root_password }}"
+  register: pxc_recovery_target_status
+  changed_when: false
+  failed_when: false
+  ignore_unreachable: true
+  delegate_to: "{{ pxc_recovery_node }}"
+  no_log: true
+
+- name: Require the recovery node to be reachable over SSH
+  ansible.builtin.assert:
+    that:
+      - not (pxc_recovery_target_status.unreachable | default(false))
+    fail_msg: >-
+      The recovery node is not reachable over SSH. Recreate or repair the
+      Droplet and regenerate the Ansible inventory before running recovery.
+
+- name: Refuse to overwrite a separate Primary component
+  ansible.builtin.assert:
+    that:
+      - >-
+        pxc_recovery_target_status.rc | default(1) != 0
+        or 'wsrep_cluster_status\tPrimary'
+        not in (pxc_recovery_target_status.stdout | default(''))
+    fail_msg: >-
+      The recovery node currently belongs to a Primary component. This may be
+      a healthy node or split brain; refusing to stop or overwrite it.
+  no_log: true
+- name: Check recovery node connectivity before preparing or stopping MySQL
+  ansible.builtin.include_tasks: network.yml

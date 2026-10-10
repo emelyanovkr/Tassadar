@@ -4,10 +4,11 @@ This playbook installs and configures a three-node Percona XtraDB Cluster. It
 expects the inventory group `pxc` to contain exactly `pxc-1`, `pxc-2`, and
 `pxc-3`.
 
-The playbook consists of two plays and two roles:
+The playbook consists of two plays and three roles:
 
 1. `Prepare Percona nodes` runs the `pxc` role on all PXC nodes.
-2. `Configure PXC cluster` runs the `pxc_cluster` orchestration role.
+2. `Configure PXC cluster` runs the `pxc_cluster` orchestration role, which
+   calls the shared `pxc_verify` role after joining the nodes.
 
 ## Role `pxc`
 
@@ -22,9 +23,11 @@ all three nodes:
 - formats the device as `ext4` only when it does not already contain a
   filesystem;
 - persists the stable `/dev/disk/by-id/virtio-data` mount in `/etc/fstab`;
+- preserves existing mount-point ownership during recovery;
 - preseeds the MySQL root password for non-interactive package installation;
 - installs the `percona-xtradb-cluster` package directly onto the mounted data
   disk without automatically starting MySQL;
+- ensures the mounted MySQL data directory belongs to `mysql` after installation;
 - calculates `server_id` from the inventory name (`pxc-1` becomes `1`);
 - renders `/etc/mysql/mysql.conf.d/mysqld.cnf` from
   `roles/pxc/templates/pxc.cnf.j2`.
@@ -88,5 +91,110 @@ The initial deployment should use the complete playbook. The `install` tag
 prepares storage and leaves MySQL stopped, `cluster` expects prepared nodes,
 and `verify` expects an already running three-node cluster.
 
+## Recover one PXC node
+
+Use the dedicated recovery playbook only when exactly one PXC node is down and
+the other two nodes form a healthy two-node Primary component:
+
+```bash
+ansible-playbook playbooks/pxc-recover-node.yml \
+  -e pxc_recovery_node=pxc-3 \
+  -e pxc_recovery_allow_sst=true
+```
+
+Optionally select either healthy survivor as the TLS source:
+
+```bash
+ansible-playbook playbooks/pxc-recover-node.yml \
+  -e pxc_recovery_node=pxc-3 \
+  -e pxc_recovery_donor=pxc-2 \
+  -e pxc_recovery_allow_sst=true
+```
+
+The explicit SST acknowledgement is required because a joining node may need
+a full State Snapshot Transfer, which replaces its local MySQL data. The role
+uses IST automatically when Galera can obtain all missing writes from a
+survivor's cache.
+
+The recovery node must already be reachable over SSH. If the Droplet itself is
+lost, use OpenTofu first to replace that Droplet, reattach its data volume, and
+regenerate `inventory.ini`. Do not use this playbook for a full-cluster outage;
+that procedure must select a safe bootstrap node from Galera recovery state.
+
+For example, inspect the replacement plan before applying it:
+
+```bash
+cd ../tofu
+tofu plan -replace='digitalocean_droplet.pxc["pxc-3"]'
+tofu apply -replace='digitalocean_droplet.pxc["pxc-3"]'
+```
+
+The plan must replace the selected Droplet and its attachment without replacing
+the corresponding `digitalocean_volume.pxc_data` resource. After apply,
+return to `ansible/` and run the recovery playbook with the same node name.
+
 Project-level run commands, connectivity checks, and basic MySQL commands are
 documented in the root `README.md`.
+
+## Recovery verification
+
+Recovery checks TCP port 4567 on both survivors from the target node before
+preparing it, and runs the shared `pxc_verify` health and write/read checks after
+joining. The TCP check does not cover reverse traffic, UDP, or the SST/IST ports;
+those transfers are validated by the real synchronization step. Shared
+verification resets only the dedicated `percona.example` test table.
+
+## Test a node outage and recovery
+
+On an already installed, healthy, dedicated test cluster, run from `ansible/`:
+
+```bash
+ansible-playbook playbooks/pxc-test-recovery.yml \
+  -e pxc_recovery_node=pxc-3 \
+  -e pxc_test_allow_node_stop=true \
+  -e pxc_recovery_allow_sst=true
+```
+
+This test deliberately stops MySQL on the selected node. It requires explicit
+acknowledgement before any database writes or service changes. It:
+
+1. verifies the original three-node cluster;
+2. writes a unique baseline record from the selected node and verifies it on
+   both survivors;
+3. stops both possible MySQL services on that node;
+4. waits for a healthy two-node component, writes one record on each survivor,
+   and verifies both writes while the selected node is still down;
+5. invokes the production recovery role's preflight and orchestration;
+6. verifies the baseline and outage records on every node, including the
+   recovered node.
+
+The test uses `percona.recovery_probe`, separate from `percona.example`, so
+recovery's ordinary replication check cannot erase the outage evidence. Records
+are isolated by a random run ID. Final verification attempts to delete only
+that run's records, including when the final read check fails. Earlier failures
+can leave those test records in place for diagnosis.
+
+An `always` block attempts recovery even if the outage write/read check fails.
+If recovery itself fails its safety or connectivity checks, fix that problem
+and run `pxc-recover-node.yml` manually; the test cannot guarantee restoration
+through a network failure. Do not interrupt the test while the node is down.
+Run one such test at a time.
+
+The test reuses the production recovery role on an already prepared node; it
+does not exercise the recovery playbook's package installation or disk mount
+step. It simulates MySQL unavailability with a controlled service stop, not a
+hard crash, network partition, or Droplet loss. It does not force IST or SST;
+coverage of both transfer paths requires separate real-cluster runs.
+
+## Automation
+
+Deployment and recovery automatically run the shared `pxc_verify` health and
+replication checks. No separate local test command is required.
+
+CI/CD can run the same deployment and recovery playbooks. The outage scenario
+in `pxc-test-recovery.yml` is a separate, explicitly enabled test for a dedicated
+test cluster; it deliberately stops MySQL and should not run on every deployment.
+
+There is no local simulated regression suite. Negative cases such as missing
+replica rows, Non-Primary status, and unreachable Galera ports are enforced by
+the Ansible tasks but are not covered by separate automated regression tests.

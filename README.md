@@ -6,9 +6,10 @@ OpenTofu provisions a three-node Percona XtraDB Cluster in DigitalOcean. Ansible
 
 - the region's default DigitalOcean VPC, reused and kept after `tofu destroy`;
 - one public bastion Droplet;
+- one FlowerCA application Droplet connected to PXC over the private VPC;
 - three PXC Droplets connected through private VPC addresses;
 - one dedicated ext4 Block Storage volume per PXC node;
-- Cloud Firewalls allowing SSH/MySQL from the bastion and Galera traffic only between PXC nodes.
+- Cloud Firewalls allowing SSH to FlowerCA only from the bastion, public HTTPS to FlowerCA, MySQL from FlowerCA to PXC, and Galera traffic only between PXC nodes.
 
 ## Configuration
 
@@ -89,3 +90,15 @@ ansible pxc -b -m shell -a \
 ```
 
 The expected cluster size is `3` on every PXC node.
+
+To recover one unavailable PXC member while the other two nodes remain a
+healthy Primary component, run from `ansible/`:
+
+```bash
+ansible-playbook playbooks/pxc-recover-node.yml \
+  -e pxc_recovery_node=pxc-3 \
+  -e pxc_recovery_allow_sst=true
+```
+
+OpenTofu is needed before this playbook only when the Droplet itself must be
+recreated. MySQL/PXC recovery on an SSH-reachable node is handled by Ansible.

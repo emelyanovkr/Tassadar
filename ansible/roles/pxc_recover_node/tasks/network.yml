@@ -1,0 +1,14 @@
+---
+# Probe from the joiner, not from the Ansible controller or bastion.
+# SST/IST ports (4444/4568) need not listen outside a state transfer.
+- name: Wait for Galera TCP access from recovery node to each survivor
+  ansible.builtin.wait_for:
+    host: "{{ hostvars[item].ansible_host }}"
+    port: 4567
+    connect_timeout: 5
+    timeout: "{{ pxc_recovery_network_timeout | default(30) }}"
+    state: started
+  loop: "{{ groups['pxc'] | difference([pxc_recovery_node]) | sort }}"
+  loop_control:
+    label: "{{ pxc_recovery_node }} -> {{ item }}:4567"
+  delegate_to: "{{ pxc_recovery_node }}"

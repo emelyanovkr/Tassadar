@@ -17,7 +17,7 @@ resource "digitalocean_droplet" "pxc" {
   region     = var.region
   size       = local.pxc_config.size
   vpc_uuid   = data.digitalocean_vpc.pxc.id
-  ssh_keys   = [digitalocean_ssh_key.admin.fingerprint]
+  ssh_keys   = [local.admin_ssh_key.fingerprint]
   monitoring = true
   tags       = [digitalocean_tag.pxc.name]
 

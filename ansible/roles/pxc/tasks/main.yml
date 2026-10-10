@@ -82,12 +82,12 @@
       - "{{ pxc_data_device }}"
   when: (pxc_data_filesystem_probe.stdout | trim) == ''
 
+# On recovery this path is already mounted and owned by mysql.
+# Preserve ownership here; changing it to root prevents MySQL from writing.
 - name: Create MySQL data mount point
   ansible.builtin.file:
     path: "{{ pxc_mysql_datadir }}"
     state: directory
-    owner: root
-    group: root
     mode: "0755"
 
 - name: Persist PXC data mount in fstab
@@ -143,6 +143,14 @@
     policy_rc_d: 101
   environment:
     DEBIAN_FRONTEND: noninteractive
+
+- name: Ensure MySQL owns the mounted data directory
+  ansible.builtin.file:
+    path: "{{ pxc_mysql_datadir }}"
+    state: directory
+    owner: mysql
+    group: mysql
+    mode: "0755"
 
 - name: Calculate PXC server id from host name
   ansible.builtin.set_fact:

@@ -1,0 +1,42 @@
+---
+- name: Validate PXC node recovery
+  hosts: pxc
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Run PXC node recovery preflight checks
+      ansible.builtin.include_role:
+        name: pxc_recover_node
+        tasks_from: preflight
+        apply:
+          tags:
+            - recovery
+      run_once: true
+      tags:
+        - recovery
+
+- name: Prepare the PXC recovery node
+  hosts: "{{ pxc_recovery_node | default('pxc-recovery-target-not-set') }}"
+  become: true
+  any_errors_fatal: true
+  roles:
+    - role: pxc
+      tags:
+        - recovery
+
+- name: Recover the PXC node
+  hosts: pxc
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Join the recovery node to the healthy cluster
+      ansible.builtin.include_role:
+        name: pxc_recover_node
+        apply:
+          tags:
+            - recovery
+      run_once: true
+      tags:
+        - recovery

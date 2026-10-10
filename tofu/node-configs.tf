@@ -4,6 +4,11 @@ locals {
     size  = "s-1vcpu-1gb"
   }
 
+  flowerca_config = {
+    image = "ubuntu-24-04-x64"
+    size  = "s-2vcpu-4gb"
+  }
+
   pxc_config = {
     image          = "ubuntu-24-04-x64"
     size           = "s-2vcpu-4gb"

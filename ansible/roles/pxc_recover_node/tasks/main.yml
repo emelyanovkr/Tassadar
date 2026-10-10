@@ -1,0 +1,80 @@
+---
+- name: Stop bootstrap service on recovery node
+  ansible.builtin.systemd:
+    name: mysql@bootstrap.service
+    state: stopped
+    enabled: false
+  delegate_to: "{{ pxc_recovery_node }}"
+
+- name: Stop regular MySQL service on recovery node
+  ansible.builtin.systemd:
+    name: mysql
+    state: stopped
+  delegate_to: "{{ pxc_recovery_node }}"
+
+- name: Read PXC TLS files from healthy donor
+  ansible.builtin.slurp:
+    src: "{{ pxc_mysql_datadir }}/{{ item }}"
+  loop: "{{ pxc_tls_files }}"
+  register: pxc_recovery_tls_file_content
+  delegate_to: >-
+    {{ pxc_recovery_donor | default(
+      groups['pxc'] | difference([pxc_recovery_node]) | sort | first,
+      true
+    ) }}
+  no_log: true
+
+- name: Install cluster TLS files on recovery node
+  ansible.builtin.copy:
+    content: >-
+      {{ (pxc_recovery_tls_file_content.results
+          | selectattr('item', 'equalto', item)
+          | first).content | b64decode }}
+    dest: "{{ pxc_mysql_datadir }}/{{ item }}"
+    owner: mysql
+    group: mysql
+    mode: "{{ '0600' if item in pxc_tls_private_files else '0644' }}"
+  loop: "{{ pxc_tls_files }}"
+  delegate_to: "{{ pxc_recovery_node }}"
+  no_log: true
+
+- name: Start regular MySQL service on recovery node
+  ansible.builtin.systemd:
+    name: mysql
+    state: started
+    enabled: true
+    no_block: true
+  delegate_to: "{{ pxc_recovery_node }}"
+
+- name: Wait for recovery node to join and synchronize
+  ansible.builtin.command: >
+    mysql --user={{ pxc_root_user }}
+    --batch --skip-column-names
+    --execute="SHOW STATUS WHERE Variable_name IN
+    ('wsrep_cluster_size', 'wsrep_cluster_status', 'wsrep_local_state_comment',
+    'wsrep_connected', 'wsrep_ready');"
+  environment:
+    MYSQL_PWD: "{{ pxc_root_password }}"
+  register: pxc_recovery_join_status
+  changed_when: false
+  until:
+    - pxc_recovery_join_status.rc == 0
+    - "'wsrep_cluster_size\t3' in pxc_recovery_join_status.stdout"
+    - "'wsrep_cluster_status\tPrimary' in pxc_recovery_join_status.stdout"
+    - "'wsrep_local_state_comment\tSynced' in pxc_recovery_join_status.stdout"
+    - "'wsrep_connected\tON' in pxc_recovery_join_status.stdout"
+    - "'wsrep_ready\tON' in pxc_recovery_join_status.stdout"
+  retries: 180
+  delay: 10
+  delegate_to: "{{ pxc_recovery_node }}"
+  no_log: true
+
+- name: Verify cluster health and replication after recovery
+  ansible.builtin.include_role:
+    name: pxc_verify
+    apply:
+      tags:
+        - recovery
+  run_once: true
+  tags:
+    - recovery

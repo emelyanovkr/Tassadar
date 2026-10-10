@@ -1,0 +1,184 @@
+---
+# Run only on a dedicated test cluster: this deliberately stops one member.
+- name: Test single-node PXC recovery with writes during the outage
+  hosts: pxc
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Require explicit acknowledgement of the recovery test
+      ansible.builtin.assert:
+        that:
+          - pxc_test_allow_node_stop | default(false) | bool
+          - pxc_recovery_allow_sst | default(false) | bool
+          - pxc_recovery_node | default('') in groups['pxc']
+        fail_msg: >-
+          This test deliberately stops MySQL on one node. Run it only on a
+          dedicated test cluster with pxc_test_allow_node_stop=true,
+          pxc_recovery_allow_sst=true, and pxc_recovery_node set.
+      run_once: true
+
+    - name: Verify the healthy cluster before stopping a node
+      ansible.builtin.include_role:
+        name: pxc_verify
+      run_once: true
+
+    - name: Allocate a unique recovery test identifier
+      ansible.builtin.set_fact:
+        pxc_recovery_test_id: "{{ lookup('password', '/dev/null length=32 chars=ascii_lowercase,digits') }}"
+        pxc_recovery_test_survivors: "{{ groups['pxc'] | difference([pxc_recovery_node]) | sort }}"
+      run_once: true
+
+    - name: Calculate expected test records
+      ansible.builtin.set_fact:
+        pxc_recovery_test_expected_rows: >-
+          {{ ['before:' ~ pxc_recovery_node]
+             + (pxc_recovery_test_survivors | map('regex_replace', '^', 'during:') | list) }}
+      run_once: true
+
+    - name: Create the isolated recovery test table
+      ansible.builtin.command: >-
+        mysql --user={{ pxc_root_user }}
+        --execute="CREATE TABLE IF NOT EXISTS percona.recovery_probe (
+        run_id CHAR(32) NOT NULL,
+        phase VARCHAR(16) NOT NULL,
+        writer VARCHAR(30) NOT NULL,
+        PRIMARY KEY (run_id, phase, writer)
+        );"
+      environment:
+        MYSQL_PWD: "{{ pxc_root_password }}"
+      delegate_to: "{{ pxc_recovery_test_survivors | first }}"
+      run_once: true
+      no_log: true
+
+    - name: Write a baseline record from the node that will be stopped
+      ansible.builtin.command: >-
+        mysql --user={{ pxc_root_user }}
+        --execute="INSERT INTO percona.recovery_probe (run_id, phase, writer)
+        VALUES ('{{ pxc_recovery_test_id }}', 'before', '{{ pxc_recovery_node }}');"
+      environment:
+        MYSQL_PWD: "{{ pxc_root_password }}"
+      delegate_to: "{{ pxc_recovery_node }}"
+      run_once: true
+      no_log: true
+
+    - name: Wait for the baseline record on both survivors
+      ansible.builtin.command: >-
+        mysql --user={{ pxc_root_user }} --batch --skip-column-names
+        --execute="SELECT CONCAT(phase, ':', writer) FROM percona.recovery_probe
+        WHERE run_id = '{{ pxc_recovery_test_id }}' ORDER BY phase, writer;"
+      environment:
+        MYSQL_PWD: "{{ pxc_root_password }}"
+      loop: "{{ pxc_recovery_test_survivors }}"
+      register: pxc_recovery_test_baseline
+      changed_when: false
+      until: pxc_recovery_test_baseline.stdout_lines == ['before:' ~ pxc_recovery_node]
+      retries: 15
+      delay: 2
+      delegate_to: "{{ item }}"
+      run_once: true
+      no_log: true
+
+    - name: Stop one node and test writes on the surviving cluster
+      run_once: true
+      block:
+        - name: Stop the selected node bootstrap service
+          ansible.builtin.systemd:
+            name: mysql@bootstrap.service
+            state: stopped
+          delegate_to: "{{ pxc_recovery_node }}"
+
+        - name: Stop the selected node regular MySQL service
+          ansible.builtin.systemd:
+            name: mysql
+            state: stopped
+          delegate_to: "{{ pxc_recovery_node }}"
+
+        - name: Wait for both survivors to form a healthy two-node cluster
+          ansible.builtin.command: >-
+            mysql --user={{ pxc_root_user }} --batch --skip-column-names
+            --execute="SHOW STATUS WHERE Variable_name IN
+            ('wsrep_cluster_size', 'wsrep_cluster_status', 'wsrep_local_state_comment',
+            'wsrep_connected', 'wsrep_ready');"
+          environment:
+            MYSQL_PWD: "{{ pxc_root_password }}"
+          loop: "{{ pxc_recovery_test_survivors }}"
+          register: pxc_recovery_test_survivor_status
+          changed_when: false
+          until:
+            - "'wsrep_cluster_size\t2' in pxc_recovery_test_survivor_status.stdout_lines"
+            - "'wsrep_cluster_status\tPrimary' in pxc_recovery_test_survivor_status.stdout_lines"
+            - "'wsrep_local_state_comment\tSynced' in pxc_recovery_test_survivor_status.stdout_lines"
+            - "'wsrep_connected\tON' in pxc_recovery_test_survivor_status.stdout_lines"
+            - "'wsrep_ready\tON' in pxc_recovery_test_survivor_status.stdout_lines"
+          retries: 36
+          delay: 5
+          delegate_to: "{{ item }}"
+          no_log: true
+
+        - name: Write one record from each survivor while the recovery node is stopped
+          ansible.builtin.command: >-
+            mysql --user={{ pxc_root_user }}
+            --execute="INSERT INTO percona.recovery_probe (run_id, phase, writer)
+            VALUES ('{{ pxc_recovery_test_id }}', 'during', '{{ item }}');"
+          environment:
+            MYSQL_PWD: "{{ pxc_root_password }}"
+          loop: "{{ pxc_recovery_test_survivors }}"
+          delegate_to: "{{ item }}"
+          no_log: true
+
+        - name: Verify all outage writes on both survivors
+          ansible.builtin.command: >-
+            mysql --user={{ pxc_root_user }} --batch --skip-column-names
+            --execute="SELECT CONCAT(phase, ':', writer) FROM percona.recovery_probe
+            WHERE run_id = '{{ pxc_recovery_test_id }}' ORDER BY phase, writer;"
+          environment:
+            MYSQL_PWD: "{{ pxc_root_password }}"
+          loop: "{{ pxc_recovery_test_survivors }}"
+          register: pxc_recovery_test_outage_reads
+          changed_when: false
+          until: pxc_recovery_test_outage_reads.stdout_lines == pxc_recovery_test_expected_rows
+          retries: 15
+          delay: 2
+          delegate_to: "{{ item }}"
+          no_log: true
+      always:
+        # Attempt recovery even if the outage write/read check fails.
+        # No preparation role is needed: the test uses an installed cluster.
+        - name: Run the production recovery preflight
+          ansible.builtin.include_role:
+            name: pxc_recover_node
+            tasks_from: preflight
+
+        - name: Run the production recovery orchestration
+          ansible.builtin.include_role:
+            name: pxc_recover_node
+
+    - name: Verify that recovery preserved baseline and outage writes
+      run_once: true
+      block:
+        - name: Read baseline and outage records on every node after recovery
+          ansible.builtin.command: >-
+            mysql --user={{ pxc_root_user }} --batch --skip-column-names
+            --execute="SELECT CONCAT(phase, ':', writer) FROM percona.recovery_probe
+            WHERE run_id = '{{ pxc_recovery_test_id }}' ORDER BY phase, writer;"
+          environment:
+            MYSQL_PWD: "{{ pxc_root_password }}"
+          loop: "{{ groups['pxc'] | sort }}"
+          register: pxc_recovery_test_final_reads
+          changed_when: false
+          until: pxc_recovery_test_final_reads.stdout_lines == pxc_recovery_test_expected_rows
+          retries: 15
+          delay: 2
+          delegate_to: "{{ item }}"
+          no_log: true
+      always:
+        - name: Remove only this run's recovery test records
+          ansible.builtin.command: >-
+            mysql --user={{ pxc_root_user }}
+            --execute="DELETE FROM percona.recovery_probe
+            WHERE run_id = '{{ pxc_recovery_test_id }}';"
+          environment:
+            MYSQL_PWD: "{{ pxc_root_password }}"
+          delegate_to: "{{ pxc_recovery_test_survivors | first }}"
+          no_log: true
