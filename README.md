@@ -102,3 +102,11 @@ ansible-playbook playbooks/pxc-recover-node.yml \
 
 OpenTofu is needed before this playbook only when the Droplet itself must be
 recreated. MySQL/PXC recovery on an SSH-reachable node is handled by Ansible.
+
+
+## Management VM from GitHub Actions
+
+The standalone [bootstrap project](bootstrap/README.md) creates a management
+VM from a GitHub-hosted runner using a separate state in the existing Spaces
+bucket. Its workflow runs manually in plan or apply mode. The current PXC and
+FlowerCA deployment remains in the existing OpenTofu root.
