@@ -61,21 +61,25 @@ cloud-init. After apply, connect with the matching private SSH key from the
 configured CIDR (any IPv4 by default), verify the SSH host fingerprint using the DigitalOcean console,
 and check:
 
-    ssh -i /path/to/private-key root@<manager-public-ip>
+    ssh -i /path/to/private-key -o IdentitiesOnly=yes root@<manager-public-ip>
     cloud-init status --wait
     test -f /var/lib/tassadar/bootstrap-complete
     tofu version
     ansible-playbook --version
+
+Use the private key file without the .pub suffix. Run SSH in the environment
+where that file exists; a key stored in WSL is not automatically selected by
+Windows SSH. IdentitiesOnly=yes selects the explicitly supplied identity.
 
 Cloud-init installs OpenTofu 1.12.3, Ansible core 2.18.6 in a Python virtual
 environment, and Git. Installation failures must be resolved before using the VM.
 Changes to creation settings or cloud-init may require VM replacement; inspect
 the plan before applying updates.
 
-This first stage does not register a self-hosted GitHub runner, clone the
-private repository onto the manager, install deployment credentials there,
-change the bastion firewall, or run the main infrastructure and Ansible
-playbooks. Those are subsequent stages once VM readiness is verified.
+After bootstrap, follow [the infrastructure management rollout](../docs/management.md).
+The next workflow uses a GitHub-hosted runner and SSH to check VM readiness.
+The management VM will execute future OpenTofu and Ansible operations over SSH;
+it is not registered as a persistent self-hosted GitHub runner.
 
 Ansible Vault integration is deferred. For this stage, only the DigitalOcean
 and Spaces credentials in GitHub Secrets are needed.

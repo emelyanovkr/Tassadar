@@ -110,3 +110,10 @@ The standalone [bootstrap project](bootstrap/README.md) creates a management
 VM from a GitHub-hosted runner using a separate state in the existing Spaces
 bucket. Its workflow runs manually in plan or apply mode. The current PXC and
 FlowerCA deployment remains in the existing OpenTofu root.
+
+## Infrastructure management
+
+The [management rollout plan](docs/management.md) describes execution from the
+management VM through GitHub-hosted runners and SSH. Stage 1 provides the manual
+Check management VM workflow, including pinned SSH host verification and a
+readiness Summary. Main infrastructure deployment and recovery remain later stages.
